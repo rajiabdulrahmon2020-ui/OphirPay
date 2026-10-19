@@ -6,6 +6,11 @@ import { STELLAR_NETWORK, SOROBAN_RPC_URL, HORIZON_URL } from "@/lib/stellar";
 import { OPHIRPAY_CONTRACT_ID } from "@/lib/contracts";
 import { successResponse, serverError } from "@/lib/api-response";
 import { withRequestLogging } from "@/lib/request-logging";
+import {
+  getRpcFailoverState,
+  isRpcFailoverDegraded,
+  RPC_FAILOVER_DEGRADED_AFTER_MS,
+} from "@/lib/rpc-failover";
 
 // ── Check helpers ──────────────────────────────────────────────
 
@@ -62,7 +67,8 @@ export const GET = withMetrics("GET /api/health", withRequestLogging(async funct
       const start = Date.now();
       await prisma.$queryRaw`SELECT 1`;
       dbLatency = Date.now() - start;
-    } catch {
+    } catch (err) {
+      console.error("[HealthCheck] Database connection failed:", err);
       dbStatus = "error";
     }
 
@@ -119,11 +125,18 @@ export const GET = withMetrics("GET /api/health", withRequestLogging(async funct
         ? "ok"
         : "error";
 
+    // ── RPC failover state (issue #820) ─────────────────────
+    // Which endpoint is currently serving, whether we are on a fallback,
+    // and how many failovers have occurred — the first questions an
+    // operator asks during an upstream RPC incident.
+    const failover = getRpcFailoverState();
+    const failoverDegraded = isRpcFailoverDegraded();
+
     const optionalChecks = [rpcStatus, horizonStatus, contractStatus, redisStatus].filter(
       (s: string) => s !== "disabled" && s !== "unchecked"
     );
     const hasOptionalError = optionalChecks.includes("error");
-    const isDegraded = dbStatus === "ok" && hasOptionalError;
+    const isDegraded = dbStatus === "ok" && (hasOptionalError || failoverDegraded);
     const overallStatus = dbStatus === "error" ? "error" : isDegraded ? "degraded" : "ok";
 
     return successResponse(
@@ -144,6 +157,19 @@ export const GET = withMetrics("GET /api/health", withRequestLogging(async funct
             id: OPHIRPAY_CONTRACT_ID || null,
             status: contractStatus,
           },
+        },
+        rpcFailover: {
+          activeEndpoint: failover.activeEndpoint,
+          primaryEndpoint: failover.primaryEndpoint,
+          usingFallback: failover.usingFallback,
+          failoverCount: failover.failoverCount,
+          recoveryCount: failover.recoveryCount,
+          currentFallbackDurationMs: failover.currentFallbackDurationMs,
+          longestFallbackDurationMs: failover.longestFallbackDurationMs,
+          lastTransitionAt: failover.lastTransitionAt,
+          degradedAfterMs: RPC_FAILOVER_DEGRADED_AFTER_MS,
+          degraded: failoverDegraded,
+          lastFailureReasons: failover.lastFailureReasons,
         },
         uptime: process.uptime(),
       },

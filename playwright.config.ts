@@ -20,18 +20,28 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      testIgnore: /.*service-worker\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
     },
     {
       name: "firefox",
+      testIgnore: /.*service-worker\.spec\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
     {
       name: "mobile-chrome",
+      testIgnore: /.*service-worker\.spec\.ts/,
       use: { ...devices["Pixel 5"] },
     },
+    {
+      name: "service-worker",
+      testMatch: /.*service-worker\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        serviceWorkers: "allow",
+      },
+    },
   ],
-  // Note: playwright.config.ts intentionally has no webServer block.
-  // Therefore, `npm run test:e2e` requires a server already listening on E2E_BASE_URL.
-  // Set E2E_BASE_URL env var to override (default: localhost:3000 for local dev).
+  // No webServer block: start and prepare the app before running E2E.
+  // See docs/E2E_TESTING.md for database, contract, and mocking requirements.
 });

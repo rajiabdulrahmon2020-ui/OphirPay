@@ -1,8 +1,8 @@
-# RBAC Audit — State-Changing API Routes
-
 > Generated for [Issue #392](https://github.com/OphirPay/OphirPay/issues/392).
-> Each state-changing route (POST / PUT / PATCH / DELETE) is listed with its
+> Audit of state-changing routes (POST / PUT / PATCH / DELETE), listed with its
 > required authentication and any role-based access control enforcement.
+
+# RBAC Audit — State-Changing API Routes
 
 ## Legend
 
@@ -87,7 +87,10 @@ authenticated user.
 | Route | Notes |
 |-------|-------|
 | `/api/health` | Health check — bypasses rate limiting |
-| `/api/metrics` | Prometheus metrics — bypasses rate limiting |
+
+> `/api/metrics` was public when this audit was written; it now requires a
+> scrape credential (`METRICS_TOKEN` bearer token or an admin API key) — see
+> [Per-Endpoint Metrics](./metrics-endpoints.md).
 
 ## Gaps Found
 

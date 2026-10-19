@@ -20,6 +20,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs-links:
+    name: "Documentation — Markdown Links"
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+      - run: npm run check:docs-links
+
   # ══════════════════════════════════════════════════════════════
   # 1. LINT — ESLint with zero tolerance (issue #677)
   #    The `npm run ci` gate runs this exact command; the workflow used to
@@ -31,9 +42,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version-file: '.nvmrc', cache: "npm" }
-      - run: npm ci
+      - uses: ./.github/actions/setup-node-prisma # node-version-file: '.nvmrc'
       - run: npm run lint -- --max-warnings 0
 
   # ══════════════════════════════════════════════════════════════
@@ -45,26 +54,41 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version-file: '.nvmrc', cache: "npm" }
-      - run: npm ci
-      - run: npx prisma generate
+      - uses: ./.github/actions/setup-node-prisma # node-version-file: '.nvmrc'
       - run: npx tsc --noEmit
+      - name: Verify generated API client catalogue is current (issue #822)
+        run: node scripts/generate-api-client.mjs --check
 
   # ══════════════════════════════════════════════════════════════
-  # 3. UNIT TESTS — Vitest (800 frontend tests)
+  # 3. UNIT TESTS — Vitest (3000+ frontend tests)
   # ══════════════════════════════════════════════════════════════
   unit-tests:
     name: "3️⃣ Frontend — Unit Tests (Vitest)"
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The suite is ~3000 tests across ~225 files and does not finish in five
+    # minutes; the old cap killed the runner mid-suite, which reported as a
+    # red job even with every assertion still passing. 30 leaves headroom for a
+    # cold cache without letting a genuinely hung suite burn a runner for an
+    # hour.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version-file: '.nvmrc', cache: "npm" }
-      - run: npm ci
-      - run: npx prisma generate
-      - run: npx vitest run --reporter=verbose
+      - uses: ./.github/actions/setup-node-prisma # node-version-file: '.nvmrc'
+      - name: Run unit tests (4 shards — fresh process per quarter; see vitest.config.ts)
+        # One vitest process accumulates per-file state (jsdom environments,
+        # Prisma engines) across all 226 files and OOMs near the end even
+        # though every assertion passes. Sharding gives each quarter of the
+        # suite a fresh process; shards run sequentially so the check name
+        # (and branch-protection match) is unchanged.
+        run: |
+          set -e
+          for i in 1 2 3 4; do
+            echo "::group::Vitest shard $i/4"
+            npx vitest run --shard=$i/4 --reporter=verbose
+            echo "::endgroup::"
+          done
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
 
   # ══════════════════════════════════════════════════════════════
   # 4. NEXT.JS BUILD — Production build verification (issue #677)
@@ -77,15 +101,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version-file: '.nvmrc', cache: "npm" }
-      - run: npm ci
-      - run: npx prisma generate
+      - uses: ./.github/actions/setup-node-prisma # node-version-file: '.nvmrc'
       - run: npm run build
       - name: Verify build output
         run: |
           test -d .next && echo "✅ .next directory exists"
           test -f .next/BUILD_ID && echo "✅ BUILD_ID exists"
+
+      - name: JavaScript bundle-size budget
+        # Reads the App Router client-reference manifests emitted by the build
+        # above and fails when a route exceeds its committed budget (#739).
+        # The per-route table is also appended to the job summary.
+        run: node scripts/check-bundle-budget.mjs
 
   # ══════════════════════════════════════════════════════════════
   # 5. CONTRACT WASM BUILD — Build both Soroban contracts
@@ -121,6 +148,15 @@ jobs:
         env:
           RUSTFLAGS: "-C link-arg=-s"
         run: cd contracts/emitter && cargo build --target wasm32v1-none --release
+      - name: Run fee assertions and emit fee report
+        run: cargo test --manifest-path contracts/ophirpay/Cargo.toml --test fee_report -- --nocapture
+        env:
+          OPHIRPAY_FEE_REPORT_PATH: ${{ github.workspace }}/fee-report.json
+      - name: Check contract regressions against baseline
+        run: node scripts/check-contract-regressions.mjs
+        env:
+          FEE_REPORT_PATH: fee-report.json
+          REGRESSION_REPORT_PATH: contract-regression-report.md
       - name: Optimize WASM (OphirPay + Emitter)
         run: |
           set -e
@@ -170,6 +206,29 @@ jobs:
           sudo mv gitleaks /usr/local/bin/
       - name: Run Gitleaks detect
         run: gitleaks detect --config .gitleaks.toml --verbose --redact
+      # Stellar seed self-test (issue #1398): the config must extend the default
+      # rules AND catch a Stellar `S…` secret seed. A config that silently
+      # replaces the defaults (no `[extend]`) would pass the scan above while
+      # detecting nothing, so this positive control is what keeps the gate real.
+      - name: Self-test — the Stellar seed rule catches a sample seed
+        run: |
+          set -e
+          tmp="$(mktemp -d)"
+          printf 'STELLAR_SECRET_KEY=S%s\n' "$(printf 'A%.0s' $(seq 1 55))" > "$tmp/sample.txt"
+          set +e
+          # --verbose is required: without it gitleaks prints only the finding
+          # count, not the RuleID this step greps for.
+          gitleaks detect --no-git --source "$tmp" --config .gitleaks.toml \
+            --no-banner --redact --verbose >/tmp/gitleaks-stellar.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ] && grep -q "stellar-secret-seed" /tmp/gitleaks-stellar.log; then
+            echo "✅ Stellar seed rule caught the sample seed (rule: stellar-secret-seed)"
+          else
+            echo "::error::Stellar seed rule did NOT flag a sample seed (exit $rc)"
+            cat /tmp/gitleaks-stellar.log
+            exit 1
+          fi
       # Scanner self-test (issue #393): prove the blocklist catches a sample
       # secret and does not false-positive on clean text. The fixture
       # directory is allowlisted for the repo-wide scan above, so these
@@ -217,6 +276,19 @@ jobs:
       - run: bash scripts/validate-deploy-config.sh
 
   # ══════════════════════════════════════════════════════════════
+  # 6. MONITORING — validate the shipped Grafana artifact
+  # ══════════════════════════════════════════════════════════════
+  grafana-dashboard:
+    name: "6️⃣ Infra — Grafana Dashboard"
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: '.nvmrc', cache: "npm" }
+      - run: node scripts/validate-grafana-dashboard.mjs
+
+  # ══════════════════════════════════════════════════════════════
   # 8. HELM LINT — chart lint + render assertions (issue #684)
   #    Proves the autoscaling / pdb / networkPolicy / serviceAccount
   #    values actually produce objects instead of being inert.
@@ -249,6 +321,9 @@ jobs:
       - name: Render and assert the flag-gated objects
         run: |
           set -euo pipefail
+
+          # Default values — the chart must render cleanly with nothing set.
+          helm template ophirpay helm/ophirpay > /tmp/default.yaml
 
           helm template ophirpay helm/ophirpay \
             --set autoscaling.enabled=true \
@@ -302,18 +377,44 @@ jobs:
       
       - name: Validate with kubeconform
         run: |
+          kubeconform -strict -summary /tmp/default.yaml
           kubeconform -strict -summary /tmp/enabled.yaml
           kubeconform -strict -summary /tmp/disabled.yaml
 
-      - name: Assert ConfigMap keys against .env.example
+      - name: Assert rendered config keys against .env.example
+        # AC of #730: a broken template or an unknown config key must fail the
+        # job. Every key the chart renders into the ConfigMap/Secret has to be
+        # a variable the app documents in .env.example, and no documented
+        # variable may be missing, so config drift cannot recur silently.
         run: |
-          # Extract keys from .env.example (ignore comments and empty lines)
-          grep -v '^#' .env.example | grep -v '^$' | cut -d= -f1 | sort > /tmp/env.keys
-          
-          # Render ConfigMap and extract keys
-          helm template ophirpay helm/ophirpay --show-only templates/config.yaml > /tmp/config.yaml
-          grep '  [A-Z_]*:' /tmp/config.yaml | awk -F':' '{print $1}' | sed 's/^[ \t]*//' | sort > /tmp/cm.keys
-          
-          # Compare the keys. If there's a difference, fail.
-          diff -u /tmp/env.keys /tmp/cm.keys || { echo "::error::ConfigMap keys do not match .env.example"; exit 1; }
+          set -euo pipefail
 
+          # Documented variables (commented-out optional ones are excluded).
+          grep -v '^#' .env.example | grep -v '^$' | cut -d= -f1 | sort -u > /tmp/env.keys
+
+          # Keys rendered by the chart (ConfigMap `data` + Secret `stringData`).
+          helm template ophirpay helm/ophirpay --show-only templates/config.yaml \
+            | grep -E '^  [A-Z][A-Z0-9_]*:' \
+            | awk -F':' '{print $1}' \
+            | sed 's/^[[:space:]]*//' \
+            | sort -u > /tmp/chart.keys
+
+          fail=0
+          while read -r key; do
+            grep -Fxq "$key" /tmp/chart.keys || {
+              echo "::error::.env.example variable '$key' is not rendered by the chart"
+              fail=1
+            }
+          done < /tmp/env.keys
+
+          while read -r key; do
+            grep -Fxq "$key" /tmp/env.keys || {
+              echo "::error::chart renders '$key', which is not documented in .env.example"
+              fail=1
+            }
+          done < /tmp/chart.keys
+
+          if [ "$fail" -eq 0 ]; then
+            echo "✅ Rendered config keys match .env.example ($(wc -l < /tmp/chart.keys | tr -d ' ') keys)"
+          fi
+          exit "$fail"
