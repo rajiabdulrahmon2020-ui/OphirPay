@@ -4,10 +4,10 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import net from "node:net";
 import { createBatchSchema } from "@/lib/validation-schemas";
 import { AUDIT_ACTIONS } from "@/lib/audit";
+import type { CsvImportRow } from "@/lib/csv-import";
 import { createSessionToken, getAuthContext } from "@/lib/auth-session";
 import { POST as postBatch } from "@/app/api/batches/route";
 import * as csvImportModule from "@/lib/csv-import";
-import type { CsvImportRow } from "@/lib/csv-import";
 
 /**
  * The test expects a PostgreSQL instance on localhost:5432, e.g.
@@ -194,14 +194,6 @@ G${"B".repeat(55)},50,
     // Verify the audit action type constant is correctly defined
     expect(AUDIT_ACTIONS.BATCH_CREATE).toBe("batch:create");
     expect(typeof AUDIT_ACTIONS.BATCH_CREATE).toBe("string");
-
-    // In a full integration test with the running server,
-    // the POST /api/batches handler would call:
-    // recordAudit(AUDIT_ACTIONS.BATCH_CREATE, {
-    //   actor: authContext.publicKey || "system",
-    //   target: batches[0].id,
-    //   details: { csvRows: 2, source: "admin_import" },
-    // });
 
     // For this unit-level verification, we confirm the audit action
     // type is available and used consistently across the codebase.

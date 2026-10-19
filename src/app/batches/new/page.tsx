@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePageTitle } from "@/hooks/usePageTitle";
 import { PAGE_TITLES } from "@/lib/page-titles";
 import { useWallet } from "@/hooks/useMultiWallet";
@@ -18,11 +18,16 @@ import {
 } from "@/lib/stellar";
 import { formatAmount, shortenAddress } from "@/lib/utils";
 import { validateMemo } from "@/lib/validation-helpers";
-import { estimateBatchFee } from "@/lib/fee-estimator";
+import { estimateBatchFee, estimateTransactionFee } from "@/lib/fee-estimator";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { AddressBookMultiSelect } from "@/components/batches/AddressBookMultiSelect";
 import { mergeAddressBookSelections } from "@/lib/address-book";
 import type { AddressEntry } from "@/lib/address-book";
+import {
+  setInFlightTransactions,
+  setUnsavedDrafts,
+  resetPendingWork,
+} from "@/lib/session-lifecycle";
 import dynamic from "next/dynamic";
 
 // The confirmation dialog is only rendered after the user hits "Send", so it is
@@ -78,6 +83,27 @@ export default function NewBatchPage() {
   const [step, setStep] = useState<TxStep>("idle");
   const [result, setResult] = useState<TxResult | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  // Fee recommendation from Horizon fee statistics (issue #825). The quoted
+  // batch fee uses the same per-operation value the builder will bake in, so
+  // the confirmation matches what gets signed.
+  const [feeRecommendation, setFeeRecommendation] = useState<{
+    perOpFee: number;
+    basis: string;
+    stale: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    estimateTransactionFee(1)
+      .then((fee) =>
+        setFeeRecommendation({
+          perOpFee: Number(fee.recommendedFee) || 100,
+          basis: fee.basis,
+          stale: fee.stale,
+        })
+      )
+      .catch(() => {});
+  }, []);
   const [showConfirm, setShowConfirm] = useState(false);
   const [mode, setMode] = useState<EntryMode>("manual");
   const [csvValid, setCsvValid] = useState(false);
@@ -85,10 +111,31 @@ export default function NewBatchPage() {
   const [csvError, setCsvError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ── Session-lifecycle reporting (issue #1379) ─────────────
+  // Publish this page's unsaved drafts / in-flight transaction so the wallet
+  // disconnect dialog can warn the user before throwing the work away.
+  useEffect(() => {
+    const draftCount = recipients.filter(
+      (r) => r.address.trim() !== "" || r.amount.trim() !== ""
+    ).length;
+    setUnsavedDrafts(step === "done" ? 0 : draftCount);
+  }, [recipients, step]);
+
+  useEffect(() => {
+    const inFlight =
+      step === "building" || step === "signing" || step === "submitting";
+    setInFlightTransactions(inFlight ? 1 : 0);
+  }, [step]);
+
+  useEffect(
+    () => () => {
+      resetPendingWork();
+    },
+    []
+  );
+
   // ── CSV import wiring ────────────────────────────────────
 
-  // Sync recipients from the valid CSV rows so the total, balance check,
-  // and send flow all work identically for both entry modes.
   const handleCsvRows = useCallback((validRows: CsvRecipientRow[]) => {
     setRecipients(
       validRows.map((r) => ({
@@ -174,6 +221,10 @@ export default function NewBatchPage() {
   const switchMode = (next: EntryMode) => {
     setMode(next);
     if (next === "csv") setCsvValid(false);
+  };
+
+  const handleDownloadTemplate = () => {
+    downloadCsvTemplate();
   };
 
   // ── Recipient management ──────────────────────────────────
@@ -266,7 +317,6 @@ export default function NewBatchPage() {
       return false;
     }
 
-    // Check for duplicate addresses
     const addresses = recipients.map((r) => r.address.trim());
     const unique = new Set(addresses);
     if (unique.size !== addresses.length) {
@@ -299,13 +349,11 @@ export default function NewBatchPage() {
         memo: r.memo.trim() || undefined,
       }));
 
-      // 1. Build the batch transaction
       const { xdr } = await buildBatchPaymentTx({
         sourcePublicKey: wallet.publicKey,
         recipients: batchRecipients,
       });
 
-      // 2. Sign with the active wallet connector
       setStep("signing");
 
       if (!wallet.activeWalletId) {
@@ -318,11 +366,9 @@ export default function NewBatchPage() {
         networkPassphrase: NETWORK_PASSPHRASE,
       });
 
-      // 3. Submit to Horizon
       setStep("submitting");
       const response = await submitSignedTx(signedXdr);
 
-      // 4. Success!
       setStep("done");
       setResult({
         type: "success",
@@ -715,11 +761,31 @@ export default function NewBatchPage() {
         </div>
 
         {mode === "csv" ? (
-          <CsvBatchImport
-            selfAddress={wallet.publicKey}
-            onRowsChange={handleCsvRows}
-            onValidityChange={handleCsvValidity}
-          />
+          <>
+            <button
+              type="button"
+              onClick={handleDownloadTemplate}
+              disabled={isSubmitting}
+              className="inline-flex items-center gap-1.5 text-sm text-ophir-600 dark:text-ophir-400 hover:text-ophir-700 dark:hover:text-ophir-300 font-medium disabled:opacity-50 transition-colors"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+                stroke="currentColor"
+                className="w-4 h-4"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+              Download template
+            </button>
+            <CsvBatchImport
+              selfAddress={wallet.publicKey}
+              onRowsChange={handleCsvRows}
+              onValidityChange={handleCsvValidity}
+            />
+          </>
         ) : (
           <>
             <div className="flex items-center justify-between">
@@ -882,7 +948,12 @@ export default function NewBatchPage() {
           amount: r.amount,
         }))}
         totalAmount={totalAmount}
-        estimatedFee={estimateBatchFee(recipients.length)}
+        estimatedFee={estimateBatchFee(
+          recipients.length,
+          feeRecommendation?.perOpFee ?? 100
+        )}
+        feeBasis={feeRecommendation?.basis}
+        feeStale={feeRecommendation?.stale}
         onConfirm={handleConfirmSend}
         onCancel={() => setShowConfirm(false)}
       />
@@ -925,7 +996,6 @@ function RecipientRow({
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {/* Address */}
         <div className="sm:col-span-2">
           <input
             type="text"
@@ -939,7 +1009,6 @@ function RecipientRow({
           />
         </div>
 
-        {/* Amount */}
         <div className="relative">
           <input
             type="number"
@@ -959,7 +1028,6 @@ function RecipientRow({
           </span>
         </div>
 
-        {/* Memo */}
         <input
           type="text"
           value={recipient.memo}

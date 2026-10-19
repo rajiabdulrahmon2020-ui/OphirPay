@@ -14,6 +14,11 @@ import type { MultiWalletState, WalletId } from "@/lib/wallets";
 import { getWalletConnector, getAvailableWallets, setActiveWalletId } from "@/lib/wallets";
 import { fetchXlmBalance } from "@/lib/stellar";
 import { establishSession, revokeSession } from "@/lib/client-auth";
+import { clearWalletSession } from "@/lib/session";
+import {
+  notifySessionRevoked,
+  resetPendingWork,
+} from "@/lib/session-lifecycle";
 
 // ── Context ───────────────────────────────────────────────────
 
@@ -201,6 +206,15 @@ export function MultiWalletProvider({ children }: { children: React.ReactNode })
     setActiveWalletId(null);
     setError(null);
 
+    // Issue #1379: a disconnect is a full session teardown, not just a UI
+    // reset. Clear the persisted wallet session, drop any pending-work flags,
+    // and announce the revocation so the QueryProvider purges every cached
+    // balance/transaction query — otherwise the next wallet (or a reload on a
+    // shared machine) could read the previous account's cached data.
+    clearWalletSession();
+    resetPendingWork();
+    notifySessionRevoked();
+
     if (walletId) {
       try {
         const connector = getWalletConnector(walletId);
@@ -209,7 +223,7 @@ export function MultiWalletProvider({ children }: { children: React.ReactNode })
         // Best effort
       }
     }
-    // Revoke the server-side session cookie
+    // Revoke the server-side HTTP-only session cookie
     await revokeSession();
   }, [wallet.activeWalletId]);
 
@@ -246,6 +260,37 @@ export function MultiWalletProvider({ children }: { children: React.ReactNode })
 
 // ── Hook ──────────────────────────────────────────────────────
 
+/**
+ * Access the authenticated multi-wallet state and controls (Freighter, Albedo,
+ * xBull). Must be rendered inside a `MultiWalletProvider` — throwing otherwise.
+ *
+ * @example
+ * Connect a wallet, read the active account, and refresh its balance:
+ *
+ * ```tsx
+ * function WalletBar() {
+ *   const { wallet, connect, disconnect, fetchBalance, isConnecting } =
+ *     useWallet();
+ *
+ *   if (!wallet.connected) {
+ *     return (
+ *       <button onClick={() => connect("freighter")} disabled={isConnecting}>
+ *         Connect Wallet
+ *       </button>
+ *     );
+ *   }
+ *
+ *   return (
+ *     <div>
+ *       <span>{shortenAddress(wallet.publicKey!, 6)}</span>
+ *       <span>{wallet.balance} XLM</span>
+ *       <button onClick={fetchBalance}>Refresh</button>
+ *       <button onClick={disconnect}>Disconnect</button>
+ *     </div>
+ *   );
+ * }
+ * ```
+ */
 export function useWallet() {
   const context = useContext(WalletContext);
   if (!context) {

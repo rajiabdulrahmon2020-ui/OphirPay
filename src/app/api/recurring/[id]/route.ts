@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 import { withMetrics } from "@/lib/metrics-middleware";
 
-import { successResponse, handleApiError, notFoundError, unauthorizedError, badRequestError } from "/lib/api-response";
-import { getAuthContext } from "/lib/auth-session";
-import { simulateContractCall, invokeContractCall, DEFAULT_CONTRACT_ID, CHAIN_READ_SOURCE } from "@lib/contracts";
+import { successResponse, handleApiError, notFoundError, unauthorizedError, badRequestError } from "@/lib/api-response";
+import { getAuthContext } from "@/lib/auth-session";
+import { simulateContractCall, DEFAULT_CONTRACT_ID, CHAIN_READ_SOURCE } from "@/lib/contracts";
 import { nativeToScVal } from "@stellar/stellar-sdk";
+import { verifyCsrf } from "@/lib/csrf";
+import prisma from "@/lib/prisma";
+import { logger } from "@/lib/logger";
 import { withRequestLogging } from "@/lib/request-logging";
 
 /**
@@ -48,47 +51,34 @@ export const GET = withMetrics("GET /api/recurring/[id]", withRequestLogging(asy
 }));
 
 /**
- * PATCH /api/recurring/[id] — pause or resume a recurring payment.
- * Expects a JSON body: { "paused": boolean }
+ * PATCH /api/recurring/[id] — cancel (soft-deactivate) a recurring payment.
+ * The schedule is scoped to the authenticated owner; this mirrors the
+ * "cancel" action on the recurring payments list. Deactivating stops the
+ * scheduler from firing it while preserving its run history.
  */
-export async function PATCH(
+export const PATCH = withMetrics("PATCH /api/recurring/[id]", withRequestLogging(async function PATCH(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
+    const csrfError = verifyCsrf(request);
+    if (csrfError) return csrfError;
+
     const auth = await getAuthContext(request);
-    if (!auth) {
-      return unauthorizedError(
-        "Authentication required. Connect your wallet or provide an API key."
-      );
-    }
+    if (!auth) return unauthorizedError("Authentication required.");
 
     const { id } = await params;
-    const recurringId = parseInt(id, 10);
+    if (!id) return notFoundError("Invalid recurring payment ID");
 
-    if (isNaN(recurringId)) {
-      return notFoundError("Invalid recurring payment ID");
-    }
+    const result = await prisma.recurrence.updateMany({
+      where: { id, userId: auth.userId },
+      data: { isActive: false },
+    });
+    if (result.count === 0) return badRequestError("Recurring payment not found");
 
-    const body = await request.json();
-    if (typeof body.paused !== "boolean") {
-      return badRequestError("Request body must include a 'paused' boolean field.");
-    }
-
-    const result = await invokeContractCall(
-      DEFAULT_CONTRACT_ID,
-      "set_recurring_paused",
-      auth,
-      [nativeToScVal(recurringId, { type: "u64" }),
-        nativeToScVal(body.paused, { type: "bool" })]
-    );
-
-    if (result.status === "SIMULATION_FAILED" || !result.returnValue) {
-      return handleApiError(new Error("Failed to update recurring payment"), "PATCH /api/recurring/[id]");
-    }
-
-    return successResponse(result.returnValue);
+    logger.info("Recurring payment cancelled", { id, userId: auth.userId });
+    return successResponse({ cancelled: true });
   } catch (err) {
     return handleApiError(err, "PATCH /api/recurring/[id]");
   }
-}
+}));

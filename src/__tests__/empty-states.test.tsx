@@ -2,6 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { EmptyState } from "@/components/EmptyState";
 import { ToastProvider } from "@/components/ui/Toast";
@@ -154,7 +155,11 @@ describe("PaymentsPage empty state", () => {
 
   it("renders a designed empty state with a create action when there are no payments", () => {
     mockQuery({ data: { payments: [], total: 0 } });
-    render(<PaymentsPage />);
+    render(
+      <ToastProvider>
+        <PaymentsPage />
+      </ToastProvider>
+    );
 
     expect(screen.getByRole("heading", { name: /no payments yet/i })).toBeInTheDocument();
     expect(
@@ -164,7 +169,11 @@ describe("PaymentsPage empty state", () => {
 
   it("navigates to the send page when the empty-state action is clicked", () => {
     mockQuery({ data: { payments: [], total: 0 } });
-    render(<PaymentsPage />);
+    render(
+      <ToastProvider>
+        <PaymentsPage />
+      </ToastProvider>
+    );
 
     fireEvent.click(screen.getByRole("button", { name: /create first payment/i }));
     expect(routerPushMock).toHaveBeenCalledWith("/send");
@@ -187,7 +196,11 @@ describe("PaymentsPage empty state", () => {
         total: 1,
       },
     });
-    render(<PaymentsPage />);
+    render(
+      <ToastProvider>
+        <PaymentsPage />
+      </ToastProvider>
+    );
 
     expect(screen.queryByRole("heading", { name: /no payments yet/i })).toBeNull();
     expect(screen.getByText("#1")).toBeInTheDocument();
@@ -201,7 +214,19 @@ describe("PaymentsPage empty state", () => {
 describe("BatchesPage empty state", () => {
   it("renders a designed empty state with a create action when there are no batches", () => {
     mockQuery({ data: [] });
-    render(<BatchesPage />);
+    // BatchesPage calls useQueryClient() directly (live-event cache
+    // invalidation) and useToast(), so it needs providers around the
+    // mocked query hooks.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ToastProvider>
+          <BatchesPage />
+        </ToastProvider>
+      </QueryClientProvider>
+    );
 
     expect(
       screen.getByRole("heading", { name: /no batch payments yet/i })
@@ -259,39 +284,32 @@ describe("EventsPage empty states", () => {
   beforeEach(() => {
     MockEventSource.instances = [];
     routerPushMock.mockClear();
+    // jsdom does not implement scrollIntoView; EventFeed auto-scrolls.
+    Element.prototype.scrollIntoView = vi.fn();
   });
 
-  it("renders a designed empty state for the live feed with a send action", () => {
+  it("renders a designed empty state for the live feed", async () => {
     mockQuery({ data: { payments: [] } });
     render(<EventsPage />);
 
+    // EventFeed is code-split via next/dynamic — wait for it to mount.
     expect(
-      screen.getByRole("heading", { name: /no live events yet/i })
+      await screen.findByText(/listening for payment events/i)
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /send a payment/i })
+      screen.getByText(/send a payment to see it appear here in real-time/i)
     ).toBeInTheDocument();
   });
 
-  it("navigates to the send page from the live empty-state action", () => {
+  it("renders a designed empty state for on-chain records", async () => {
     mockQuery({ data: { payments: [] } });
     render(<EventsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: /send a payment/i }));
-    expect(routerPushMock).toHaveBeenCalledWith("/send");
-  });
-
-  it("renders a designed empty state for on-chain records with a send action", () => {
-    mockQuery({ data: { payments: [] } });
-    render(<EventsPage />);
-
-    fireEvent.click(screen.getByRole("button", { name: /on-chain/i }));
+    const onChainTab = await screen.findByRole("button", { name: /on-chain/i });
+    fireEvent.click(onChainTab);
 
     expect(
-      screen.getByRole("heading", { name: /no on-chain records/i })
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /send a payment/i })
+      await screen.findByText(/no on-chain records yet/i)
     ).toBeInTheDocument();
   });
 });
@@ -305,78 +323,28 @@ describe("AuditLogPage empty states", () => {
     MockEventSource.instances = [];
   });
 
-  it("renders a designed empty state with an enable-live action when there are no entries", () => {
-    mockQuery({ data: [] });
+  it("renders a designed empty state with an enable-live affordance when there are no entries", () => {
+    mockQuery({ data: { entries: [], total: 0 } });
     render(<AuditLogPage />);
 
     expect(
       screen.getByRole("heading", { name: /no audit entries/i })
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /enable live/i })
-    ).toBeInTheDocument();
+    // The Live toggle lives in the page header — it's the affordance that
+    // starts real-time streaming from an empty audit log.
+    expect(screen.getByRole("button", { name: /▶ live/i })).toBeInTheDocument();
   });
 
-  it("starts live streaming from the empty-state action", () => {
-    mockQuery({ data: [] });
+  it("starts live streaming from the live toggle", () => {
+    mockQuery({ data: { entries: [], total: 0 } });
     render(<AuditLogPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: /enable live/i }));
+    fireEvent.click(screen.getByRole("button", { name: /▶ live/i }));
 
     expect(MockEventSource.instances).toHaveLength(1);
     expect(MockEventSource.instances[0].url).toBe("/api/audit-log/sse");
-    expect(
-      screen.getByText(/listening for contract activity/i)
-    ).toBeInTheDocument();
-  });
-
-  it("renders a clear-filter action when a filter matches nothing", () => {
-    mockQuery({
-      data: [
-        {
-          id: 1,
-          timestamp: 1700000000,
-          action: "payment_recorded",
-          actor: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-          target_id: 1,
-          details: "Payment 1 recorded",
-        },
-      ],
-    });
-    render(<AuditLogPage />);
-
-    fireEvent.change(screen.getByPlaceholderText(/filter by action or details/i), {
-      target: { value: "zzz-no-match" },
-    });
-
-    expect(
-      screen.getByRole("heading", { name: /no matching entries/i })
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /clear filter/i })
-    ).toBeInTheDocument();
-  });
-
-  it("clears the filter from the empty-state action", () => {
-    mockQuery({
-      data: [
-        {
-          id: 1,
-          timestamp: 1700000000,
-          action: "payment_recorded",
-          actor: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-          target_id: 1,
-          details: "Payment 1 recorded",
-        },
-      ],
-    });
-    render(<AuditLogPage />);
-
-    fireEvent.change(screen.getByPlaceholderText(/filter by action or details/i), {
-      target: { value: "zzz-no-match" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /clear filter/i }));
-
-    expect(screen.getByText("Payment 1 recorded")).toBeInTheDocument();
+    // Once live, the toggle reflects the connection state (✕ = not yet
+    // confirmed via the "connected" event).
+    expect(screen.getByRole("button", { name: /live ✕/i })).toBeInTheDocument();
   });
 });

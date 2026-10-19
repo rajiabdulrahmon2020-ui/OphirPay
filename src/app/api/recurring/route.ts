@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: MIT
 import { withMetrics } from "@/lib/metrics-middleware";
 
-import prisma from "/bim/prisma";
-import { createRecurrenceSchema, paginationSchema } from "@lib/validation-schemas";
+import prisma from "@/lib/prisma";
+import { createRecurrenceSchema, paginationSchema } from "@/lib/validation-schemas";
 import {
   successResponse,
   validationError,
   unauthorizedError,
   handleApiError,
-} from "@lib/api-response";
-import { logger } from "@lib/logger";
-import { getAuthContext } from "@lib/auth-session";
+} from "@/lib/api-response";
+import { logger } from "@/lib/logger";
+import { getAuthContext } from "@/lib/auth-session";
 import { withRequestLogging } from "@/lib/request-logging";
+import { verifyCsrf } from "@/lib/csrf";
 import { z } from "zod";
 
 const updateRecurrenceSchema = z.object({
@@ -56,6 +57,9 @@ export const GET = withMetrics("GET /api/recurring", withRequestLogging(async fu
 
 export const POST = withMetrics("POST /api/recurring", withRequestLogging(async function POST(request: Request) {
   try {
+    const csrfError = verifyCsrf(request);
+    if (csrfError) return csrfError;
+
     const auth = await getAuthContext(request);
     if (!auth) {
       return unauthorizedError(
@@ -97,8 +101,11 @@ export const POST = withMetrics("POST /api/recurring", withRequestLogging(async 
   }
 }));
 
-export async function PATCH(request: Request) {
+export const PATCH = withMetrics("PATCH /api/recurring", withRequestLogging(async function PATCH(request: Request) {
   try {
+    const csrfError = verifyCsrf(request);
+    if (csrfError) return csrfError;
+
     const auth = await getAuthContext(request);
     if (!auth) {
       return unauthorizedError(
@@ -124,7 +131,7 @@ export async function PATCH(request: Request) {
 
     const recurrence = await prisma.recurrence.update({
       where: { id },
-      data: { paused },
+      data: { isActive: !paused },
     });
 
     logger.info("Recurring payment updated", { id: recurrence.id, paused });
@@ -132,4 +139,4 @@ export async function PATCH(request: Request) {
   } catch (err) {
     return handleApiError(err, "PATCH /api/recurring");
   }
-}
+}));
